@@ -1,0 +1,274 @@
+---
+title: "Classification and Variable Selection Exercise"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# Describing the data set
+
+```{r}
+load("sample_data.RData")
+
+summary(A)
+```
+
+The data set "A" is a list with X (a data frame) and Y (a factor).
+
+We have **77 observations**.
+
+```{r}
+summary(A$Y)
+```
+
+The **target variable Y** is categorical, with two possible levels: -1 and 1.
+
+The data set is balanced, i.e., half the observations have Y = -1 and the other half Y = 1.
+
+In **X,** we have **200 explanatory variables**, labelled V1, V2, ..., V200. All are numeric and with different ranges (*summary omitted*). No missing values detected.
+
+I will place both Y and the X variables in the same data frame.
+
+```{r}
+data_ad = A$X
+data_ad$Y <- A$Y
+```
+
+# Methodology
+
+This is a Classification problem. Due to the high number of candidates for explanatory variables, variable selection will be performed using Random Forests with the VSURF package. Then, Logistic Regression and Classification Tree models will be used to make predictions. I will compare the two models by calculating the accuracy, which is given by
+
+$$ \text{Accuracy} = \frac{\text{Number of correct predictions}}{\text{Total number of predictions}} . $$
+
+Before starting, the data set will be split into Learning and Test sets.
+
+# Splitting the data set
+
+The models will be trained using the Learning set. Around 20% of the data will be kept separately on the Test set to test the models' predictions.
+
+```{r}
+splitProb <- c(0.8,0.2)  
+splitNames <-c("Learning","Test")
+
+n = nrow(x=data_ad) 
+
+splitVector<- sample( x=splitNames, size=n, prob=splitProb, replace=TRUE ) 
+
+table(splitVector)/n
+```
+
+```{r}
+#getting the indeces
+indeces<-list( 
+  learning = which(x=(splitVector=="Learning")),
+  test=which(x=(splitVector=="Test"))
+  )
+#splitting the data set
+learningSet<-data_ad[indeces$learning,]
+testSet<-data_ad[indeces$test,]
+```
+
+```{r}
+summary(learningSet$Y)
+```
+
+# Variable Selection
+
+Since there are 200 different explanatory variables, I will use variable selection using Random Forest to detect the most relevant variables for prediction.
+
+```{r}
+library('VSURF')
+#Three steps variable selection procedure based on random forests for 
+#supervised classification and regression problems. 
+#First step ("thresholding step") is dedicated to eliminate irrelevant 
+#variables from the dataset. Second step ("interpretation step") 
+#aims to select all variables related to the response for interpretation purpose.
+#Third step ("prediction step") refines the selection by eliminating redundancy in 
+#the set of variables selected by the second step, for prediction purpose.
+set.seed(221921186)
+Vy<-VSURF(Y~.,data=learningSet)
+summary(Vy)
+plot(Vy,step="pred",var.names=TRUE)
+```
+
+Explanatory variables selected at prediction step:
+
+```{r}
+variables = c()
+for (i in Vy$varselect.pred){
+  variables <- c(variables,colnames(learningSet)[i])
+}
+variables
+```
+
+Correlation matrix:
+
+```{r}
+cor(learningSet[,variables])
+```
+
+There is still high correlation between some variables selected.
+
+I will increase the "nmj" in the VSURF function, which is a multiplicative constant that can be used to modulate the threshold.
+
+```{r}
+library('VSURF')
+set.seed(221921186)
+Vy<-VSURF(Y~.,data=learningSet, nmj = 10)
+summary(Vy)
+plot(Vy,step="pred",var.names=TRUE)
+```
+
+Explanatory variables selected this time:
+
+```{r}
+variables = c()
+for (i in Vy$varselect.pred){
+  variables <- c(variables,colnames(learningSet)[i])
+}
+variables
+```
+
+Adding the target variable to the list of variables:
+
+```{r}
+variables <- c(variables, "Y")
+```
+
+New Learning Set:
+
+```{r}
+learningSet= learningSet[,variables]
+head(learningSet)
+```
+
+New Test Set:
+
+```{r}
+testSet= testSet[,variables]
+head(testSet)
+```
+
+# Logistic Regression
+
+Note: Some combinations for explanatory variables, such as V3 and V6, may sometimes lead to a warning by the glm function, saying that the algorithm did not converge and that fitted probabilities are numerically 0 and 1. This may happen when the variables chosen perfectly explain the target variable. In this case, predicted values perfectly match the real test values and accuracy is 100%.
+
+```{r}
+model_lr <- glm(Y~., data = learningSet, family=binomial)
+```
+
+```{r}
+pred_lr = predict(model_lr, newdata=testSet, type = "response")
+```
+
+```{r}
+pred_lr <- ifelse(pred_lr >=.5, 1, -1)
+pred_lr
+```
+
+```{r}
+confusion_matrix_lr <- table(testSet$Y, pred_lr)
+confusion_matrix_lr
+```
+
+# Classification Tree
+
+First, the maximal tree is obtained, maintaining the complexity parameter CP low.
+
+The minimum number of observations in a node in order that an split is attempted is set as 2.
+
+```{r}
+library(rpart) 
+library(rpart.plot) 
+#maximal tree
+tree_max=rpart(Y~.,data=learningSet,  method = "class", minsplit = 2, cp = 10^(-9))
+rpart.plot(tree_max)
+```
+
+Then, the maximal tree is pruned using the 1-SE rule.
+
+```{r}
+finalcart=function(T)
+{
+  P=printcp(T)
+  CV=P[,4] #crossvalidation error (CV)
+  a=which(CV==min(CV)) #finding the row with the smallest CV
+  s=P[a,4]+P[a,5] #adding the standard deviation - the new threshold used in the 1SE rule
+  ss=min(s) #in case s is a vector (several values are the min)
+  b=which(CV<=ss)
+  d=b[1] #selected value of CP
+  Tf=prune(T,cp=P[d,1],  method = "class") #pruning the maximal tree using the selected CP
+  finalcart=Tf
+}
+```
+
+```{r}
+tree1 = finalcart(tree_max)
+rpart.plot(tree1)
+```
+
+```{r}
+pred_tree<- predict(tree1, method = "class", newdata = testSet)
+```
+
+The output is 0 and 1s. Converting it back to the original -1 and 1 levels.
+
+```{r}
+predict_tree_converter <- function(predictions_tree, set){
+  results = c()
+  for (i in 1:nrow(set)){
+    if (predictions_tree[i,1] == 0){
+      results= c(results,1)
+    }
+    else{
+      results = c(results,-1)
+    }
+  }
+  return(results)
+}
+
+```
+
+```{r}
+pred_tree = predict_tree_converter(pred_tree, testSet)
+```
+
+```{r}
+confusion_matrix_tree <- table(testSet$Y, pred_tree)
+confusion_matrix_tree
+```
+
+# Discussion and Conclusion
+
+Calculating the accuracy of predictions obtained with each model.
+
+```{r}
+#function to calculate accuracy
+accuracy <- function(results, set){
+corrects = 0
+for(i in 1:nrow(set)){
+  if (results[i] == set$Y[i]){
+    corrects = corrects + 1
+  }
+}
+corrects
+accuracy = 100*corrects/nrow(set)
+return(accuracy)
+}
+```
+
+Logistic Regression accuracy:
+
+```{r}
+accuracy(pred_lr,testSet)
+```
+
+Classification Tree accuracy:
+
+```{r}
+accuracy(pred_tree,testSet)
+```
+
+The chosen model is the **Logistic Regression** model. The algorithms were ran several times, splitting the data in different ways. While the accuracy of predictions of Classification Tree strongly depends on how the data is split, the accuracy for the Logistic Regression model is much more stable and always close or equal to 100%.
+
+The variable selection was essential. It showed that of 200 variables, only a small number are really relevant. The difficulty is that some of these relevant variables are correlated to each other. For example, V1, V2 and V3 are significantly correlated, and V5 and V6 as well. Therefore, depending of how data is split, the algorithm might select different combinations of these explanatory variables. Most frequently, **V3 and V6**, **V3 and V5** or **V2 and V5** yield the best results.
